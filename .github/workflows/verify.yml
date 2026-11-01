@@ -1,0 +1,60 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      # Installs the toolchain in `lean-toolchain` and the prebuilt Mathlib oleans for the commit
+      # pinned in `lake-manifest.json`.
+      - name: Set up Lean and the Mathlib cache
+        uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+
+      - name: Build
+        run: |
+          mkdir -p evidence
+          { lean --version; lake build --wfail; } 2>&1 | tee evidence/build.log
+
+      - name: Kernel replay
+        run: |
+          mods=$(find PythagoreanPaper -name '*.lean' | sed 's/\.lean$//; s|/|.|g' | sort)
+          lake env leanchecker -v PythagoreanPaper $mods 2>&1 | tee evidence/leanchecker.log
+
+      # Fails on `sorryAx`, on any axiom other than propext, Classical.choice, Quot.sound,
+      # and on axioms declared in the project.
+      - name: Axiom report
+        run: lake env lean scripts/AxiomReport.lean 2>&1 | tee evidence/axiom-report.log
+
+      # Fails if the proof of `CurvatureChain.sec10_pythagoras` uses Mathlib's law of cosines or
+      # Pythagorean theorems anywhere in its dependency closure, or does not use the chain of §12.
+      - name: Dependency report
+        run: lake env lean scripts/DependencyReport.lean 2>&1 | tee evidence/dependency-report.log
+
+      - name: Record sources
+        if: always()
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/commit.txt
+          git ls-files -z | xargs -0 sha256sum > evidence/SHA256SUMS
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: verification-${{ github.run_id }}
+          path: evidence/
